@@ -8,17 +8,35 @@ use Illuminate\Support\Facades\Log;
 use Exception;
 use App\Models\Usuario;
 use App\Models\AccionRealizada;
+use Dotenv\Exception\ValidationException;
+use Illuminate\Support\Facades\Validator;
 
 class AuthController extends Controller
 {
     public function login(Request $request)
     {
         try {
-            // Validar los campos requeridos
-            $request->validate([
+            // Definir mensajes en español
+            $messages = [
+                'correo_electronico.required' => 'El correo electrónico es obligatorio.',
+                'correo_electronico.email' => 'El formato del correo electrónico no es válido.',
+                'password.required' => 'La contraseña es obligatoria.',
+                'password.min' => 'La contraseña debe tener al menos 8 caracteres.',
+            ];
+    
+            // Validar la solicitud con mensajes personalizados en español
+            $validator = Validator::make($request->all(), [
                 'correo_electronico' => 'required|email',
-                'password' => 'required|string|min:6',
-            ]);
+                'password' => 'required|string|min:4',
+            ], $messages);
+    
+            // Si la validación falla, devolver el mensaje en español
+            if ($validator->fails()) {
+                return response()->json([
+                    'status' => 400,
+                    'message' => $validator->errors()->first(), // Mensaje de error en español
+                ], 400);
+            }
     
             $credentials = $request->only('correo_electronico', 'password');
     
@@ -26,34 +44,18 @@ class AuthController extends Controller
             $user = Usuario::where('correo_electronico', $request->correo_electronico)->first();
     
             if (!$user) {
-                // Registrar el intento de inicio de sesión con correo no registrado
-                AccionRealizada::create([
-                    'id_usuario' => null,
-                    'descripcion' => "Intento de inicio de sesión fallido: correo no registrado ({$request->correo_electronico}).",
-                    'tipo_accion' => 'Login',
-                    'estado' => 'A',
-                ]);
-    
-                Log::warning('Intento de inicio de sesión fallido: correo no registrado.', [
+                Log::warning('Intento de inicio de sesión con correo no registrado.', [
                     'correo_electronico' => $request->correo_electronico,
                 ]);
     
                 return response()->json([
-                    'status' => 401,
-                    'message' => 'Credenciales inválidas. Por favor, verifica tu correo y contraseña.',
-                ], 401);
+                    'status' => 404,
+                    'message' => 'El usuario no está registrado.',
+                ], 404);
             }
     
             // Verificar si las credenciales son correctas
             if (!$token = auth('api')->attempt($credentials)) {
-                // Registrar el intento fallido con correo correcto pero contraseña incorrecta
-                AccionRealizada::create([
-                    'id_usuario' => $user->id_usuario,
-                    'descripcion' => "Intento de inicio de sesión fallido por contraseña incorrecta para el usuario: {$user->nombres} {$user->apellidos}.",
-                    'tipo_accion' => 'Login',
-                    'estado' => 'A',
-                ]);
-    
                 Log::warning('Intento de inicio de sesión fallido: contraseña incorrecta.', [
                     'correo_electronico' => $request->correo_electronico,
                 ]);
@@ -66,14 +68,6 @@ class AuthController extends Controller
     
             // Autenticación exitosa
             $user = auth('api')->user();
-    
-            // Registrar el inicio de sesión exitoso
-            AccionRealizada::create([
-                'id_usuario' => $user->id_usuario,
-                'descripcion' => "Inicio de sesión exitoso por usuario: {$user->nombres} {$user->apellidos}.",
-                'tipo_accion' => 'Login',
-                'estado' => 'A',
-            ]);
     
             Log::info('Inicio de sesión exitoso.', [
                 'id_usuario' => $user->id_usuario,
@@ -92,12 +86,11 @@ class AuthController extends Controller
                         'apellidos' => $user->apellidos,
                         'correo_electronico' => $user->correo_electronico,
                         'rol' => $user->rol->nombre_rol,
-                        'prefix_rol' => $user->rol->prefix_rol, // Agregar el prefijo del rol aquí
+                        'prefix_rol' => $user->rol->prefix_rol,
                     ],
                 ],
             ], 200);
         } catch (Exception $e) {
-            // Registrar el error en los logs
             Log::error('Error en el login.', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
@@ -109,6 +102,7 @@ class AuthController extends Controller
             ], 500);
         }
     }
+    
     
     
     public function logout()

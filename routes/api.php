@@ -49,7 +49,6 @@ Route::middleware(['auth:api', 'handle.token.expiration'])->group(function () {
         Route::put('/{id}', [ClientesController::class, 'ActualizarCliente']); // Actualizar cliente
         Route::delete('/{id}', [ClientesController::class, 'EliminarCliente']); // Eliminar cliente (cambia estado a "E")
         Route::post('/{id}/reparar', [ClientesController::class, 'repararCliente']);
-
     });
 
     Route::prefix('routers')->group(function () {
@@ -67,27 +66,28 @@ Route::middleware(['auth:api', 'handle.token.expiration'])->group(function () {
         Route::put('/{id}', [PlanController::class, 'actualizarPlan']); // Actualizar plan
         Route::delete('/{id}', [PlanController::class, 'eliminarPlan']); // Eliminar plan
         Route::put('/reparar/{id}', [PlanController::class, 'repararPlanMikroTik']);
-
     });
 
+
     Route::prefix('ippools')->group(function () {
+        Route::get('/verificar', [IpPoolController::class, 'verificarIPPoolsEnMikrotik']); // 👈 Mover antes
         Route::get('/', [IpPoolController::class, 'listarIPPool']); // Listar IP Pools
         Route::post('/', [IpPoolController::class, 'guardarIPPool']); // Crear IP Pool
         Route::get('/{id}', [IpPoolController::class, 'mostrarIPPool']); // Mostrar IP Pool específico
         Route::put('/{id}', [IpPoolController::class, 'actualizarIPPool']); // Actualizar IP Pool
+        Route::post('/importar', [IpPoolController::class, 'importarIPPoolsDesdeMikrotik']); // Importar pools
         Route::delete('/{id}', [IpPoolController::class, 'eliminarIPPool']); // Eliminar IP Pool
         Route::post('/reparar/{id}', [IpPoolController::class, 'repararIPPool']);
     });
-
-
+    
     Route::prefix('olts')->group(function () {
         Route::post('/obtener', [OLTController::class, 'obtenerOLTs']);
-        Route::post('/obtener-olt', [OLTController::class, 'obtenerOLT']);
+        Route::get('/obtener-olt/{id_olt}', [OLTController::class, 'obtenerOLT']);
         Route::post('/crear', [OLTController::class, 'crearOLT']);
         Route::post('/actualizar', [OLTController::class, 'actualizarOLT']);
         Route::post('/eliminar', [OLTController::class, 'eliminarOLT']);
     });
-    
+
     Route::prefix('onts')->group(function () {
         Route::get('/obtener', [OntController::class, 'obtenerOnts']); // Obtener todas las ONUs
         Route::get('/obtener/{id_onu}', [OntController::class, 'mostrarOnt']); // Obtener ONU específica

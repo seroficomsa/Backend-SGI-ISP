@@ -113,12 +113,12 @@ class OntController extends Controller
         $request->validate([
             'id_ont' => 'required|integer|exists:onts,id_ont',
             'modelo' => 'string|max:100',
-            'sn' => 'string|max:50|unique:onts,sn,' . $request->id_ont,
-            'gpon_sn' => 'string|max:50|unique:onts,gpon_sn,' . $request->id_ont,
-            'mac' => 'string|max:17|unique:onts,mac,' . $request->id_ont,
+            'sn' => 'string|max:50|unique:onts,sn,' . $request->id_ont . ',id_ont',
+            'gpon_sn' => 'string|max:50|unique:onts,gpon_sn,' . $request->id_ont . ',id_ont',
+            'mac' => 'string|max:17|unique:onts,mac,' . $request->id_ont . ',id_ont',
             'estado' => 'in:A,I,E',
         ]);
-
+        
         $usuarioAuditor = auth()->user();
 
         $ont = Ont::findOrFail($request->id_ont);

@@ -26,16 +26,90 @@ class OLTController extends Controller
     /**
      * Obtener una OLT específica.
      */
-    public function obtenerOLT(Request $request)
+    public function obtenerOLT($id_olt)
     {
-        $request->validate([
-            'id_olt' => 'required|integer|exists:olts,id_olt'
-        ]);
-
-        $olt = Olt::with('router')->find($request->id_olt);
-        return response()->json($olt, 200);
+        // Convertir a entero
+        $id = (int) $id_olt;
+    
+        // Validar manualmente para evitar errores
+        if (!is_int($id) || $id <= 0) {
+            return response()->json(["message" => "El ID de la OLT debe ser un entero válido."], 400);
+        }
+    
+        // Buscar la OLT en la base de datos con su relación router
+        $olt = Olt::with('router')->find($id);
+    
+        if (!$olt) {
+            return response()->json(["message" => "OLT no encontrada."], 404);
+        }
+    
+        try {
+            // Conectar por SSH a la OLT
+            $ssh = new \phpseclib3\Net\SSH2($olt->ip_olt, $olt->port_olt);
+            if (!$ssh->login($olt->user_olt, $olt->passw_olt)) {
+                throw new \Exception("Error de autenticación en la OLT.");
+            }
+    
+            // Enviar comandos a la OLT
+            $ssh->write("enable\r");
+            sleep(1);
+            $ssh->write("configure\r");
+            sleep(1);
+            $ssh->write("show system-info\r");
+            sleep(2);
+            $output = $ssh->read();
+    
+            // Registrar salida para depuración
+            Log::info("📡 Respuesta de la OLT:\n" . $output);
+    
+            // Extraer datos de la OLT
+            $data = [
+                "system_description" => $this->extractValue($output, "System Description"),
+                "system_name" => $this->extractValue($output, "System Name"),
+                "location" => $this->extractValue($output, "System Location"),
+                "contact_info" => $this->extractValue($output, "Contact Information"),
+                "hardware_version" => $this->extractValue($output, "Hardware Version"),
+                "software_version" => $this->extractValue($output, "Software Version"),
+                "bootloader_version" => $this->extractValue($output, "Bootloader Version"),
+                "mac_address" => $this->extractValue($output, "Mac Address"),
+                "serial_number" => $this->extractValue($output, "Serial Number"),
+                "system_time" => $this->extractValue($output, "System Time"),
+                "running_time" => $this->extractValue($output, "Running Time"),
+            ];
+    
+            // Cerrar conexión SSH
+            $ssh->disconnect();
+    
+            // Combinar la información de la OLT de la base de datos con la obtenida en vivo
+            $oltData = [
+                "id_olt" => $olt->id,
+                "nombre_olt" => $olt->nombre_olt,
+                "ip_olt" => $olt->ip_olt,
+                "estado" => $olt->estado,
+                "fecha_creacion" => $olt->fecha_creacion,
+                "fecha_actualizacion" => $olt->fecha_actualizacion,
+                "data_otl" => $data,
+            ];
+    
+            return response()->json($oltData, 200);
+        } catch (\Exception $e) {
+            Log::error("❌ Error en obtenerOLT: " . $e->getMessage());
+            return response()->json(["error" => "Error al obtener datos de la OLT: " . $e->getMessage()], 500);
+        }
     }
-
+    
+    /**
+     * Extrae un valor de la respuesta de la OLT basado en una clave.
+     */
+    private function extractValue($output, $key)
+    {
+        if (preg_match('/' . preg_quote($key, '/') . '\s*-\s*(.+)/', $output, $matches)) {
+            return trim($matches[1]);
+        }
+        return null;
+    }
+    
+    
     /**
      * Crear una nueva OLT.
      */

@@ -468,17 +468,6 @@ class ClientesController extends Controller
 
     /**
      * Registra (confirma) la ONT en la OLT mediante SSH usando los datos del modelo Olt.
-     *
-     * Se utiliza el gpon_sn en formato "TPLG-XXXXXXXX" para buscar y confirmar la ONT
-     * en el rango de puertos 1/0/1-8, determinando el PON ID real y luego consultando
-     * la potencia óptica. Se parsean los datos para devolver únicamente:
-     *   - PON ID  
-     *   - ONU ID  
-     *   - Serial GPON  
-     *   - Online Status  
-     *   - Active Status  
-     *   - RX (dBm)  
-     *   - TX (dBm)
      */
     private function registerONTForClient($gpon_sn, $olt, $client)
     {
@@ -486,124 +475,123 @@ class ClientesController extends Controller
             // Conectar vía SSH a la OLT usando los datos del modelo
             $ssh = new SSH2($olt->ip_olt, $olt->port_olt);
             if (!$ssh->login($olt->user_olt, $olt->passw_olt)) {
+                Log::error("❌ Error de autenticación en la OLT.");
                 throw new \Exception("Error de autenticación en la OLT.");
             }
-            $ssh->setTimeout(1);
+
+            $ssh->setTimeout(5);
             $initialOutput = $ssh->read();
             Log::info("📡 Salida inicial de la OLT:\n" . $initialOutput);
 
-            // 1) Entrar en modo enable y configuración
-            if (strpos($initialOutput, 'OLT1>') !== false) {
-                $ssh->write("enable\r");
-                $enableOutput = $ssh->read('OLT1#');
-                Log::info("📡 Salida después de 'enable':\n" . $enableOutput);
-
-                if (strpos($enableOutput, 'OLT1#') !== false) {
-                    $ssh->write("configure\r");
-                    $configureOutput = $ssh->read('OLT1(config)#');
-                    Log::info("📡 Salida después de 'configure':\n" . $configureOutput);
-
-                    if (strpos($configureOutput, 'OLT1(config)#') !== false) {
-                        // 2) Buscar la ONT en el rango 1/0/1-8
-                        $ponRange = "1/0/1-8";
-                        $autofindCmd = "show ont autofind by-sn $gpon_sn $ponRange\r";
-                        $ssh->write($autofindCmd);
-                        $autofindOutput = $ssh->read('OLT1(config)#');
-                        Log::info("📡 Salida después de '$autofindCmd':\n" . $autofindOutput);
-
-                        // 3) Extraer el PON ID real de la línea que contenga el serial
-                        $ponId = null;
-                        $lines = explode("\n", $autofindOutput);
-                        foreach ($lines as $line) {
-                            if (strpos($line, $gpon_sn) !== false) {
-                                // Ejemplo de línea: "1    8   TPLG-CEEECC28  tplink   tplink  V2 ..."
-                                $pattern = '/^\s*(\d+)\s+(\d+)\s+(TPLG-\S+)/';
-                                if (preg_match($pattern, $line, $matches)) {
-                                    // $matches[2] es el PON ID
-                                    $ponId = $matches[2];
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (!$ponId) {
-                            throw new \Exception("La ONT con el serial $gpon_sn no se encontró en ninguno de los puertos $ponRange.");
-                        }
-
-                        // 4) Entrar a la interfaz GPON correspondiente: "1/0/{ponId}"
-                        $ssh->write("interface gpon 1/0/$ponId\r");
-                        $interfaceOutput = $ssh->read("OLT1(config-if-gpon)#");
-                        Log::info("📡 Salida después de 'interface gpon 1/0/$ponId':\n" . $interfaceOutput);
-
-                        if (strpos($interfaceOutput, "OLT1(config-if-gpon)#") !== false) {
-                            // 5) Confirmar la ONT
-                            $confirmCmd = "ont confirm sn-auth $gpon_sn desc $client ont-lineprofile-id 1 ont-srvprofile-id 2\r";
-                            $ssh->write($confirmCmd);
-                            $confirmOutput = $ssh->read("OLT1(config-if-gpon)#");
-                            Log::info("📡 Salida después de '$confirmCmd':\n" . $confirmOutput);
-
-                            // Se asume que la ONT ID es 0 tras la confirmación (ajusta si es necesario)
-                            $ontId = 0;
-
-                            // 6) Esperar unos segundos y consultar la potencia óptica
-                            sleep(5);
-                            $showOpticalCmd = "show ont optical-info 1/0/$ponId $ontId\r";
-                            $ssh->write($showOpticalCmd);
-                            $opticalOutput = $ssh->read("OLT1(config-if-gpon)#");
-                            Log::info("📡 Salida después de '$showOpticalCmd':\n" . $opticalOutput);
-
-                            $ssh->disconnect();
-
-                            // 7) Parsear la salida para extraer los datos relevantes
-                            // Buscamos la línea que contenga "TPLG-"
-                            $dataLine = null;
-                            $lines = explode("\n", $opticalOutput);
-                            foreach ($lines as $line) {
-                                if (strpos($line, "TPLG-") !== false) {
-                                    $dataLine = trim($line);
-                                    break;
-                                }
-                            }
-
-                            if (!$dataLine) {
-                                throw new \Exception("No se encontró la línea con los datos de la ONT en la salida óptica.");
-                            }
-
-                            // La línea esperada tiene la siguiente estructura:
-                            // NO.   PON_ID  ONU_ID  SERIAL         ONLINE   ACTIVE   RX      TX      ... 
-                            // Ejemplo:
-                            // 1     8       0       TPLG-CEEECC28 online   active   -5.84   1.71   ...
-                            $pattern = '/^\s*\d+\s+(\d+)\s+(\d+)\s+(TPLG-\S+)\s+(\S+)\s+(\S+)\s+([\-\d.]+)\s+([\-\d.]+)/';
-                            if (preg_match($pattern, $dataLine, $matches)) {
-                                $parsedData = [
-                                    'pon_id'        => $matches[1],
-                                    'onu_id'        => $matches[2],
-                                    'gpon_serial'   => $matches[3],
-                                    'online_status' => $matches[4],
-                                    'active_status' => $matches[5],
-                                    'rx_dbm'        => $matches[6],
-                                    'tx_dbm'        => $matches[7],
-                                ];
-                            } else {
-                                throw new \Exception("No se pudo parsear la información de la ONT.");
-                            }
-
-                            return [
-                                'message' => 'ONT registrada y datos de potencia obtenidos correctamente.',
-                                'data'    => $parsedData,
-                            ];
-                        } else {
-                            throw new \Exception("No se pudo acceder a la interfaz GPON 1/0/$ponId.");
-                        }
-                    } else {
-                        throw new \Exception("No se pudo acceder al modo de configuración.");
-                    }
-                } else {
-                    throw new \Exception("El comando 'enable' no llevó al prompt esperado.");
-                }
-            } else {
-                throw new \Exception("Prompt inicial no reconocido.");
+            // Verificar si el prompt es el esperado
+            if (!preg_match('/OLT\d*>/', $initialOutput)) {
+                Log::error("❌ Error: Prompt inicial no reconocido. Salida real: " . $initialOutput);
+                throw new \Exception("Prompt inicial no reconocido. Verifica la salida de la OLT.");
             }
+
+            // 1) Entrar en modo enable
+            $ssh->write("enable\r");
+            $enableOutput = $ssh->read();
+            Log::info("📡 Salida después de 'enable':\n" . $enableOutput);
+
+            if (!strpos($enableOutput, '#')) {
+                throw new \Exception("El comando 'enable' no llevó al prompt esperado.");
+            }
+
+            // 2) Entrar en modo configuración
+            $ssh->write("configure\r");
+            $configureOutput = $ssh->read();
+            Log::info("📡 Salida después de 'configure':\n" . $configureOutput);
+
+            if (!strpos($configureOutput, "(config)#")) {
+                throw new \Exception("No se pudo acceder al modo de configuración.");
+            }
+
+            // 3) Buscar la ONT en el rango 1/0/1-8
+            $ponRange = "1/0/1-8";
+            $autofindCmd = "show ont autofind by-sn $gpon_sn $ponRange\r";
+            $ssh->write($autofindCmd);
+            $autofindOutput = $ssh->read();
+            Log::info("📡 Salida después de '$autofindCmd':\n" . $autofindOutput);
+
+            // 4) Extraer el PON ID real de la ONT
+            $ponId = null;
+            foreach (explode("\n", $autofindOutput) as $line) {
+                if (strpos($line, $gpon_sn) !== false) {
+                    if (preg_match('/^\s*(\d+)\s+(\d+)\s+(TPLG-\S+)/', $line, $matches)) {
+                        $ponId = $matches[2]; // PON ID
+                        break;
+                    }
+                }
+            }
+
+            if (!$ponId) {
+                throw new \Exception("No se encontró la ONT con el serial $gpon_sn en los puertos $ponRange.");
+            }
+
+            // 5) Entrar a la interfaz GPON correspondiente: "1/0/{ponId}"
+            $ssh->write("interface gpon 1/0/$ponId\r");
+            $interfaceOutput = $ssh->read();
+            Log::info("📡 Salida después de 'interface gpon 1/0/$ponId':\n" . $interfaceOutput);
+
+            if (!strpos($interfaceOutput, "(config-if-gpon)#")) {
+                throw new \Exception("No se pudo acceder a la interfaz GPON 1/0/$ponId.");
+            }
+
+            // 6) Confirmar la ONT
+            $confirmCmd = "ont confirm sn-auth $gpon_sn desc $client ont-lineprofile-id 1 ont-srvprofile-id 2\r";
+            $ssh->write($confirmCmd);
+            $confirmOutput = $ssh->read();
+            Log::info("📡 Salida después de '$confirmCmd':\n" . $confirmOutput);
+
+            // Se asume que la ONT ID es 0 tras la confirmación (ajusta si es necesario)
+            $ontId = 0;
+
+            // 7) Esperar unos segundos y consultar la potencia óptica
+            sleep(5);
+            $showOpticalCmd = "show ont optical-info gpon 1/0/$ponId $ontId\r";
+            $ssh->write($showOpticalCmd);
+            $opticalOutput = $ssh->read();
+            Log::info("📡 Salida después de '$showOpticalCmd':\n" . $opticalOutput);
+
+            $ssh->disconnect();
+
+            // 8) Extraer los datos relevantes de la salida
+            $dataLine = null;
+            foreach (explode("\n", $opticalOutput) as $line) {
+                if (strpos($line, "TPLG-") !== false) {
+                    $dataLine = trim($line);
+                    break;
+                }
+            }
+
+            if (!$dataLine) {
+                throw new \Exception("No se encontró la línea con los datos de la ONT en la salida óptica.");
+            }
+
+            // Formato esperado de la línea de salida:
+            // NO.   PON_ID  ONU_ID  SERIAL         ONLINE   ACTIVE   RX      TX      ... 
+            // Ejemplo:
+            // 1     8       0       TPLG-CEEECC28 online   active   -5.84   1.71   ...
+            $pattern = '/^\s*\d+\s+(\d+)\s+(\d+)\s+(TPLG-\S+)\s+(\S+)\s+(\S+)\s+([\-\d.]+)\s+([\-\d.]+)/';
+            if (preg_match($pattern, $dataLine, $matches)) {
+                $parsedData = [
+                    'pon_id'        => $matches[1],
+                    'onu_id'        => $matches[2],
+                    'gpon_serial'   => $matches[3],
+                    'online_status' => $matches[4],
+                    'active_status' => $matches[5],
+                    'rx_dbm'        => $matches[6],
+                    'tx_dbm'        => $matches[7],
+                ];
+            } else {
+                throw new \Exception("No se pudo parsear la información de la ONT.");
+            }
+
+            return [
+                'message' => 'ONT registrada y datos de potencia obtenidos correctamente.',
+                'data'    => $parsedData,
+            ];
         } catch (\Exception $e) {
             Log::error("❌ Error en registerONTForClient: " . $e->getMessage());
             throw new \Exception('Error al comunicarse con la OLT: ' . $e->getMessage());
@@ -780,101 +768,105 @@ class ClientesController extends Controller
     private function deleteONTFromOLT($gpon_sn, $olt)
     {
         try {
-            // Conectar vía SSH a la OLT
+            // 1️⃣ Conectar vía SSH a la OLT
             $ssh = new SSH2($olt->ip_olt, $olt->port_olt);
             if (!$ssh->login($olt->user_olt, $olt->passw_olt)) {
                 throw new \Exception("Error de autenticación en la OLT.");
             }
-            $ssh->setTimeout(1);
+
+            // 2️⃣ Ajustar tiempo de espera para recibir correctamente el prompt inicial
+            $ssh->setTimeout(3);
             $initialOutput = $ssh->read();
             Log::info("OLT Deletion - Salida inicial:\n" . $initialOutput);
 
-            // Ingresar a modo enable y configuración
-            if (strpos($initialOutput, 'OLT1>') !== false) {
-                $ssh->write("enable\r");
-                $enableOutput = $ssh->read('OLT1#');
-                Log::info("OLT Deletion - Salida después de 'enable':\n" . $enableOutput);
-
-                if (strpos($enableOutput, 'OLT1#') !== false) {
-                    $ssh->write("configure\r");
-                    $configureOutput = $ssh->read('OLT1(config)#');
-                    Log::info("OLT Deletion - Salida después de 'configure':\n" . $configureOutput);
-
-                    if (strpos($configureOutput, 'OLT1(config)#') !== false) {
-                        // Buscar la ONU en el rango 1/0/1-8
-                        $ponRange = "1/0/1-8";
-                        $infoCmd = "show ont info by-sn $gpon_sn $ponRange\r";
-                        $ssh->write($infoCmd);
-                        $infoOutput = $ssh->read('OLT1(config)#');
-                        Log::info("OLT Deletion - Salida de '$infoCmd':\n" . $infoOutput);
-
-                        // Extraer PON ID y ONU ID de la salida
-                        $ponId = null;
-                        $onuId = null;
-                        $lines = explode("\n", $infoOutput);
-                        foreach ($lines as $line) {
-                            if (strpos($line, $gpon_sn) !== false) {
-                                // Ejemplo de línea:
-                                // "1    8   0   TPLG-CEEECC28 online  activated   active   success match    1       2"
-                                $pattern = '/^\s*\d+\s+(\d+)\s+(\d+)\s+(TPLG-\S+)/';
-                                if (preg_match($pattern, $line, $matches)) {
-                                    $ponId = $matches[1];
-                                    $onuId = $matches[2];
-                                    break;
-                                }
-                            }
-                        }
-                        if (!$ponId || $onuId === null) {
-                            throw new \Exception("No se encontró la ONT con el serial $gpon_sn en el rango $ponRange.");
-                        }
-
-                        // Entrar a la interfaz GPON real: "interface gpon 1/0/{ponId}"
-                        $ssh->write("interface gpon 1/0/$ponId\r");
-                        $ifaceOutput = $ssh->read("OLT1(config-if-gpon)#");
-                        Log::info("OLT Deletion - Salida después de 'interface gpon 1/0/$ponId':\n" . $ifaceOutput);
-                        if (strpos($ifaceOutput, "OLT1(config-if-gpon)#") === false) {
-                            throw new \Exception("No se pudo acceder a la interfaz GPON 1/0/$ponId.");
-                        }
-
-                        // Ejecutar comandos para desactivar y eliminar la ONU:
-                        // a) Ejecutar "ont deactivate" sin parámetros
-                        $ssh->write("ont deactivate\r");
-                        $deactOutput1 = $ssh->read("OLT1(config-if-gpon)#");
-                        Log::info("OLT Deletion - ont deactivate (sin parámetro):\n" . $deactOutput1);
-
-                        // b) Ejecutar "ont deactivate {onuId}"
-                        $ssh->write("ont deactivate $onuId\r");
-                        $deactOutput2 = $ssh->read("OLT1(config-if-gpon)#");
-                        Log::info("OLT Deletion - ont deactivate $onuId:\n" . $deactOutput2);
-
-                        // c) Ejecutar "ont delete {onuId}"
-                        $ssh->write("ont delete $onuId\r");
-                        $deleteOutput = $ssh->read("OLT1(config-if-gpon)#");
-                        Log::info("OLT Deletion - ont delete $onuId:\n" . $deleteOutput);
-
-                        $ssh->disconnect();
-
-                        return [
-                            'message'      => 'ONT desactivada y eliminada en la OLT correctamente.',
-                            'pon_id'       => $ponId,
-                            'onu_id'       => $onuId,
-                            'info_output'  => $infoOutput,
-                            'delete_output' => $deleteOutput,
-                        ];
-                    } else {
-                        throw new \Exception("No se pudo acceder al modo de configuración.");
-                    }
-                } else {
-                    throw new \Exception("El comando 'enable' no llevó al prompt esperado.");
-                }
-            } else {
-                throw new \Exception("Prompt inicial no reconocido.");
+            // 3️⃣ Verificar dinámicamente el prompt inicial
+            if (!preg_match('/OLT\d*>/', $initialOutput)) {
+                Log::error("❌ OLT Deletion Error: Prompt inicial no reconocido. Salida real:\n" . $initialOutput);
+                throw new \Exception("Prompt inicial no reconocido. Verifica la salida de la OLT.");
             }
+
+            // 4️⃣ Ingresar a modo enable
+            $ssh->write("enable\r");
+            $enableOutput = $ssh->read();
+            Log::info("OLT Deletion - Salida después de 'enable':\n" . $enableOutput);
+
+            if (!strpos($enableOutput, "#")) {
+                throw new \Exception("El comando 'enable' no llevó al prompt esperado.");
+            }
+
+            // 5️⃣ Ingresar a modo configuración
+            $ssh->write("configure\r");
+            $configureOutput = $ssh->read();
+            Log::info("OLT Deletion - Salida después de 'configure':\n" . $configureOutput);
+
+            if (!strpos($configureOutput, "(config)#")) {
+                throw new \Exception("No se pudo acceder al modo de configuración.");
+            }
+
+            // 6️⃣ Buscar la ONU en el rango 1/0/1-8
+            $ponRange = "1/0/1-8";
+            $infoCmd = "show ont info by-sn $gpon_sn $ponRange\r";
+            $ssh->write($infoCmd);
+            sleep(2); // Esperar para recibir toda la respuesta
+            $infoOutput = $ssh->read();
+            Log::info("OLT Deletion - Salida de '$infoCmd':\n" . $infoOutput);
+
+            // 7️⃣ Extraer PON ID y ONU ID de la salida
+            $ponId = null;
+            $onuId = null;
+            $lines = explode("\n", $infoOutput);
+            foreach ($lines as $line) {
+                if (strpos($line, $gpon_sn) !== false) {
+                    // Ejemplo de línea:
+                    // "1    8   0   TPLG-CEEECC28 online  activated   active   success match    1       2"
+                    $pattern = '/^\s*\d+\s+(\d+)\s+(\d+)\s+(TPLG-\S+)/';
+                    if (preg_match($pattern, $line, $matches)) {
+                        $ponId = $matches[1];
+                        $onuId = $matches[2];
+                        break;
+                    }
+                }
+            }
+
+            if (!$ponId || $onuId === null) {
+                throw new \Exception("No se encontró la ONT con el serial $gpon_sn en el rango $ponRange.");
+            }
+
+            // 8️⃣ Entrar a la interfaz GPON real: "interface gpon 1/0/{ponId}"
+            $ssh->write("interface gpon 1/0/$ponId\r");
+            $ifaceOutput = $ssh->read();
+            Log::info("OLT Deletion - Salida después de 'interface gpon 1/0/$ponId':\n" . $ifaceOutput);
+
+            if (!strpos($ifaceOutput, "(config-if-gpon)#")) {
+                throw new \Exception("No se pudo acceder a la interfaz GPON 1/0/$ponId.");
+            }
+
+            // 9️⃣ Ejecutar comandos para desactivar y eliminar la ONU:
+            $ssh->write("ont deactivate $onuId\r");
+            sleep(1);
+            $deactOutput = $ssh->read();
+            Log::info("OLT Deletion - ont deactivate $onuId:\n" . $deactOutput);
+
+            $ssh->write("ont delete $onuId\r");
+            sleep(1);
+            $deleteOutput = $ssh->read();
+            Log::info("OLT Deletion - ont delete $onuId:\n" . $deleteOutput);
+
+            $ssh->disconnect();
+
+            return [
+                'message'       => 'ONT desactivada y eliminada en la OLT correctamente.',
+                'pon_id'        => $ponId,
+                'onu_id'        => $onuId,
+                'info_output'   => $infoOutput,
+                'delete_output' => $deleteOutput,
+            ];
         } catch (\Exception $e) {
             Log::error("OLT Deletion Error: " . $e->getMessage());
             throw new \Exception("Error al eliminar la ONT en la OLT: " . $e->getMessage());
         }
     }
+
 
     /**
      * Mostrar información específica de un cliente.
@@ -882,17 +874,17 @@ class ClientesController extends Controller
     public function MostrarInformacionCliente($id)
     {
         $cliente = Cliente::with(['informacionAdicional', 'usuariosClientes.usuario'])->find($id);
-    
+
         if (!$cliente) {
             return response()->json([
                 'success' => false,
                 'message' => 'Cliente no encontrado.',
             ], 404);
         }
-    
+
         // Buscar la ONT asignada al cliente
         $asignacion = AsignacionServicioCliente::where('id_cliente', $cliente->id_cliente)->first();
-    
+
         if (!$asignacion || !$asignacion->id_ont) {
             return response()->json([
                 'success' => true,
@@ -902,7 +894,7 @@ class ClientesController extends Controller
                 'mikrotik_ip' => $asignacion ? $asignacion->ip_mikrotik : 'No tiene IP asignada.',
             ], 200);
         }
-    
+
         // Obtener la ONT y su Serial GPON
         $ont = Ont::find($asignacion->id_ont);
         if (!$ont) {
@@ -914,9 +906,9 @@ class ClientesController extends Controller
                 'mikrotik_ip' => $asignacion->ip_mikrotik,
             ], 200);
         }
-    
+
         $gpon_sn = "TPLG-" . substr($ont->gpon_sn, -8);
-    
+
         // Obtener la OLT asociada al router
         $olt = Olt::where('id_router', $asignacion->id_router)->first();
         if (!$olt) {
@@ -928,10 +920,10 @@ class ClientesController extends Controller
                 'mikrotik_ip' => $asignacion->ip_mikrotik,
             ], 200);
         }
-    
+
         // Consultar información de la ONT en la OLT
         $ontData = $this->consultarInformacionONT($gpon_sn, $olt);
-    
+
         return response()->json([
             'success' => true,
             'data' => $cliente,
@@ -945,7 +937,7 @@ class ClientesController extends Controller
             ]
         ], 200);
     }
-    
+
     /**
      * Consulta la OLT para obtener información detallada de la ONT, incluyendo:
      * - PON ID
@@ -962,54 +954,54 @@ class ClientesController extends Controller
             if (!$ssh->login($olt->user_olt, $olt->passw_olt)) {
                 throw new \Exception("Error de autenticación en la OLT.");
             }
-    
-            $ssh->setTimeout(2);
-    
+
+            $ssh->setTimeout(1);
+
             // ✅ Ingresar a modo enable y configuración
             $ssh->write("enable\r");
             $ssh->read("OLT1#");
             $ssh->write("configure\r");
             $ssh->read("OLT1(config)#");
-    
+
             // 🔍 Buscar la ONT en la OLT
             $ponPortRange = "1/0/1-8";
             $showOntInfoCmd = "show ont info by-sn $gpon_sn $ponPortRange\r";
             $ssh->write($showOntInfoCmd);
-            sleep(2); // Asegurar que la respuesta se reciba completa
+            sleep(1); // Asegurar que la respuesta se reciba completa
             $ontInfoOutput = $ssh->read("OLT1(config)#");
-    
+
             Log::info("📡 Salida de 'show ont info by-sn':\n" . $ontInfoOutput);
-    
+
             // 🔎 Extraer PON ID y ONU ID de la salida usando **Regex**
             if (preg_match('/\s+(\d+)\s+(\d+)\s+' . $gpon_sn . '\s+(\w+)\s+(\w+)/', $ontInfoOutput, $matches)) {
                 $ponId = $matches[1];  // PON ID
                 $onuId = $matches[2];  // ONU ID
                 $onlineStatus = $matches[3];  // Estado Online
                 $activeStatus = $matches[4];  // Estado Activo
-    
+
                 Log::info("✅ ONT detectada - PON: $ponId, ONU: $onuId, Online: $onlineStatus, Active: $activeStatus");
-    
+
                 // ✅ Formatear PON Port como "1/0/{ponId}"
                 $ponPort = "1/0/$ponId";
-    
+
                 // 🔍 Consultar la potencia óptica de la ONT
-                $showOpticalCmd = "show ont optical-info $ponPort $onuId\r";
+                $showOpticalCmd = "show ont optical-info gpon $ponPort $onuId\r";
                 $ssh->write($showOpticalCmd);
-                sleep(2); // Esperar la respuesta
+                sleep(1); // Esperar la respuesta
                 $opticalOutput = $ssh->read("OLT1(config)#");
-    
+
                 Log::info("📡 Salida de 'show ont optical-info':\n" . $opticalOutput);
-    
+
                 // ✅ Extraer RX y TX Power usando **Regex**
                 if (preg_match('/\s+' . $ponId . '\s+' . $onuId . '\s+' . $gpon_sn . '\s+\w+\s+\w+\s+([-\d.]+)\s+([-\d.]+)/', $opticalOutput, $powerMatches)) {
                     $rxPower = $powerMatches[1]; // RX en dBm
                     $txPower = $powerMatches[2]; // TX en dBm
-    
+
                     Log::info("✅ Potencia óptica detectada - RX: $rxPower dBm, TX: $txPower dBm");
-    
+
                     // ✅ Cerrar conexión SSH
                     $ssh->disconnect();
-    
+
                     return [
                         'pon_port' => $ponPort,
                         'onu_id' => $onuId,
@@ -1033,9 +1025,9 @@ class ClientesController extends Controller
             ];
         }
     }
-    
-    
-    
+
+
+
 
 
     public function repararCliente(Request $request, $id)
